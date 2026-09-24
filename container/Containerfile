@@ -1,0 +1,4 @@
+FROM scratch
+
+# The production image installs this source through fedora45-ai-core.
+# This file exists only as a repository marker for the ephemeral layer.

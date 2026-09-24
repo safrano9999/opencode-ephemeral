@@ -1,0 +1,17 @@
+[Unit]
+Description=Rebuild ephemeral OpenCode configuration
+Requires=persistainer.service
+Wants=network-online.target tailscale-up.service
+After=network-online.target persistainer.service tailscale-up.service
+Before=opencode.service
+
+[Service]
+Type=oneshot
+Environment=HOME=/root
+ExecCondition=/bin/sh -c '[ "$${OPENCODE_START:-1}" = "1" ]'
+ExecStart=/usr/local/bin/opencode-ephemeral configure
+RemainAfterExit=yes
+TimeoutStartSec=450
+
+[Install]
+WantedBy=multi-user.target
