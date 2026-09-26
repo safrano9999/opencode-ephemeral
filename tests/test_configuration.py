@@ -67,6 +67,28 @@ class OpenCodeMcpTests(unittest.TestCase):
             )
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
+    def test_write_rebuilds_telegram_bridge_model_without_secrets(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path, _ = write_config(
+                {
+                    "HOME": temporary,
+                    "OPENCODE_TELEGRAMTOKEN": "123:secret",
+                    "OPENCODE_TELEGRAM_CHAT_ID": "5475045993",
+                    "OPENCODE_DEFAULT_PROVIDER": "chatgpt",
+                    "OPENCODE_DEFAULT_LLM": "gpt-6-luna",
+                    "OPENCODE_API_PORT": "4096",
+                }
+            )
+            self.assertTrue(path.is_file())
+            bridge = Path(temporary) / ".config/opencode-telegram-bot/.env"
+            content = bridge.read_text()
+            self.assertIn("OPENCODE_MODEL_PROVIDER=openai", content)
+            self.assertIn("OPENCODE_MODEL_ID=gpt-6-luna", content)
+            self.assertIn("OPENCODE_API_URL=http://127.0.0.1:4096", content)
+            self.assertNotIn("123:secret", content)
+            self.assertNotIn("5475045993", content)
+            self.assertEqual(bridge.stat().st_mode & 0o777, 0o600)
+
 
 if __name__ == "__main__":
     unittest.main()

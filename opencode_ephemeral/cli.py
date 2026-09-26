@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
-from .configuration import write_config
+from .configuration import telegram_config_path, write_config
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -15,6 +16,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "configure":
         path, count = write_config()
         print(f"OpenCode MCP servers configured: {count} ({path})")
+        bridge = telegram_config_path(os.environ)
+        if bridge.is_file():
+            print(f"OpenCode Telegram bridge configuration rebuilt ({bridge})")
     return 0
 
 
