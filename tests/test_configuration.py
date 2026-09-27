@@ -5,6 +5,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from opencode_ephemeral.configuration import build_config, write_config
 from opencode_ephemeral.environment import ConfigurationError
@@ -88,6 +89,74 @@ class OpenCodeMcpTests(unittest.TestCase):
             self.assertNotIn("123:secret", content)
             self.assertNotIn("5475045993", content)
             self.assertEqual(bridge.stat().st_mode & 0o777, 0o600)
+
+
+class OpenCodeProviderTests(unittest.TestCase):
+    def test_openai_v1_groups_discover_models_and_normalize_url(self) -> None:
+        class Response:
+            def __init__(self, payload: dict[str, object]) -> None:
+                self.payload = payload
+
+            def read(self, _limit: int) -> bytes:
+                return json.dumps(self.payload).encode()
+
+            def close(self) -> None:
+                pass
+
+        def opener(request: object, *, timeout: float) -> Response:
+            del timeout
+            url = getattr(request, "full_url")
+            if "abliteration" in url:
+                return Response({"data": [{"id": "abliterated-model"}]})
+            if "2001" in url:
+                return Response({"data": [{"id": "luna"}, {"id": "sol"}]})
+            return Response({"data": []})
+
+        environ = {
+            "OPENAI_V1_PROVIDER": "litellm",
+            "OPENAI_V1_URL": "https://host.containers.internal",
+            "OPENAI_V1_PORT": "2001",
+            "OPENAI_V1_KEY": "secret-one",
+            "OPENAI_V1_PROVIDER_2": "abliteration",
+            "OPENAI_V1_URL_2": "https://api.abliteration.ai/v1",
+            "OPENAI_V1_PORT_2": "443",
+            "OPENAI_V1_KEY_2": "secret-two",
+            "OPENCODE_DEFAULT_PROVIDER": "chatgpt",
+            "OPENCODE_DEFAULT_LLM": "gpt-6-luna",
+            "OPENCODE_FALLBACK_PROVIDER": "litellm",
+            "OPENCODE_FALLBACK_LLM": "luna",
+        }
+        with patch("opencode_ephemeral.configuration.urlopen", side_effect=opener):
+            config = build_config(environ)
+
+        self.assertEqual(config["provider"]["litellm"]["models"], {"luna": {}, "sol": {}})
+        self.assertEqual(
+            config["provider"]["abliteration"]["options"]["baseURL"],
+            "https://api.abliteration.ai:443/v1",
+        )
+        self.assertEqual(
+            config["provider"]["abliteration"]["models"],
+            {"abliterated-model": {}},
+        )
+
+    def test_explicit_models_survive_discovery_failure(self) -> None:
+        with patch(
+            "opencode_ephemeral.configuration.urlopen",
+            side_effect=TimeoutError,
+        ):
+            config = build_config(
+                {
+                    "OPENAI_V1_PROVIDER": "abliteration",
+                    "OPENAI_V1_URL": "https://offline.example/v1",
+                    "OPENAI_V1_KEY": "secret",
+                    "OPENAI_V1_MODELS": "abliterated-model,abliterated-model-large",
+                }
+            )
+
+        self.assertEqual(
+            config["provider"]["abliteration"]["models"],
+            {"abliterated-model": {}, "abliterated-model-large": {}},
+        )
 
 
 if __name__ == "__main__":

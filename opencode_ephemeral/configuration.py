@@ -5,12 +5,17 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
+from urllib.request import Request, urlopen
 
-from .environment import clean, without_secret_values
+from .environment import ConfigurationError, clean, without_secret_values
 from .mcp import mcp_config
+
+
+MAX_DISCOVERY_RESPONSE_BYTES = 8 * 1024 * 1024
 
 
 def _home_path(environ: Mapping[str, str]) -> Path:
@@ -39,7 +44,120 @@ def telegram_config_path(environ: Mapping[str, str]) -> Path:
     return (root / ".env").resolve()
 
 
-def _provider_groups(environ: Mapping[str, str]) -> dict[str, dict[str, Any]]:
+def _normalize_base_url(raw_url: str, raw_port: str = "") -> str:
+    value = clean(raw_url).rstrip("/")
+    port = clean(raw_port)
+    if not value:
+        return ""
+    if "://" not in value:
+        value = f"http://{value}"
+    parsed = urlsplit(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ConfigurationError("OPENAI_V1_URL must be an HTTP(S) endpoint")
+    if parsed.username is not None or parsed.password is not None:
+        raise ConfigurationError("OPENAI_V1_URL must not contain credentials")
+    try:
+        parsed_port = parsed.port
+    except ValueError as exc:
+        raise ConfigurationError("OPENAI_V1_URL contains an invalid port") from exc
+    if port:
+        try:
+            requested_port = int(port, 10)
+        except ValueError as exc:
+            raise ConfigurationError("OPENAI_V1_PORT must be an integer") from exc
+        if not 1 <= requested_port <= 65_535:
+            raise ConfigurationError("OPENAI_V1_PORT must be between 1 and 65535")
+    else:
+        requested_port = None
+
+    host = parsed.hostname
+    if ":" in host:
+        host = f"[{host}]"
+    effective_port = parsed_port if parsed_port is not None else requested_port
+    netloc = host if effective_port is None else f"{host}:{effective_port}"
+    path = parsed.path.rstrip("/") or "/v1"
+    return urlunsplit((parsed.scheme, netloc, path, "", ""))
+
+
+def _configured_models(environ: Mapping[str, str], key_name: str) -> tuple[str, ...]:
+    raw = clean(environ.get(key_name))
+    if not raw:
+        return ()
+    try:
+        decoded: Any = json.loads(raw)
+    except json.JSONDecodeError:
+        decoded = [item.strip() for item in raw.replace("\n", ",").split(",")]
+    if isinstance(decoded, Mapping):
+        decoded = decoded.get("data", decoded.get("models", []))
+    if isinstance(decoded, str):
+        decoded = [decoded]
+    if not isinstance(decoded, list):
+        raise ConfigurationError(f"{key_name} must be a JSON array or comma-separated list")
+
+    models: set[str] = set()
+    for item in decoded:
+        if isinstance(item, str) and clean(item):
+            models.add(clean(item))
+        elif isinstance(item, Mapping):
+            for field in ("id", "model", "name"):
+                value = item.get(field)
+                if isinstance(value, str) and clean(value):
+                    models.add(clean(value))
+                    break
+    if raw and not models:
+        raise ConfigurationError(f"{key_name} must contain at least one model id")
+    return tuple(sorted(models))
+
+
+def _discovered_models(
+    base_url: str,
+    *,
+    key: str,
+    opener: Callable[..., Any] | None = None,
+    timeout: float = 5.0,
+) -> tuple[str, ...]:
+    request = Request(
+        f"{base_url.rstrip('/')}/models",
+        headers={
+            "Accept": "application/json",
+            "Authorization": f"Bearer {key}",
+            "User-Agent": "opencode-ephemeral/1.0",
+        },
+        method="GET",
+    )
+    response = (opener or urlopen)(request, timeout=timeout)
+    close = getattr(response, "close", None)
+    try:
+        payload = response.read(MAX_DISCOVERY_RESPONSE_BYTES + 1)
+    finally:
+        if callable(close):
+            close()
+    if len(payload) > MAX_DISCOVERY_RESPONSE_BYTES:
+        raise ValueError("model discovery response is too large")
+    decoded = json.loads(payload.decode("utf-8"))
+    rows: Any = decoded.get("data", decoded.get("models", [])) if isinstance(decoded, Mapping) else decoded
+    if isinstance(rows, Mapping):
+        rows = list(rows.values())
+    if not isinstance(rows, list):
+        return ()
+    models: set[str] = set()
+    for row in rows:
+        if isinstance(row, str) and clean(row):
+            models.add(clean(row))
+        elif isinstance(row, Mapping):
+            for field in ("id", "model", "name"):
+                value = row.get(field)
+                if isinstance(value, str) and clean(value):
+                    models.add(clean(value))
+                    break
+    return tuple(sorted(models))
+
+
+def _provider_groups(
+    environ: Mapping[str, str],
+    *,
+    discover: bool = True,
+) -> dict[str, dict[str, Any]]:
     def name(field: str, index: int) -> str:
         if index == 1:
             return f"OPENAI_V1_{field}"
@@ -63,13 +181,20 @@ def _provider_groups(environ: Mapping[str, str]) -> dict[str, dict[str, Any]]:
         if not provider or not url or not key:
             raise ValueError(f"OPENAI_V1 group {index:02d} is incomplete")
         port = value("PORT", index)
-        base = url.rstrip("/")
-        if "://" not in base:
-            base = f"https://{base}"
-        if port and "://" in base and base.rsplit(":", 1)[-1].isdigit() is False:
-            base = f"{base}:{port}"
-        raw_models = value("MODELS", index)
-        models = [item.strip() for item in raw_models.replace("\n", ",").split(",") if item.strip()]
+        base = _normalize_base_url(url, port)
+        model_key_name = name("MODELS", index)
+        configured_models = _configured_models(environ, model_key_name)
+        models = configured_models
+        if discover:
+            try:
+                discovered = _discovered_models(
+                    base,
+                    key=key,
+                    timeout=float(clean(environ.get("OPENAI_V1_DISCOVERY_TIMEOUT")) or 5.0),
+                )
+            except Exception:
+                discovered = ()
+            models = tuple(sorted({*configured_models, *discovered}))
         result[provider] = {
             "npm": "@ai-sdk/openai-compatible",
             "name": provider,
@@ -80,7 +205,10 @@ def _provider_groups(environ: Mapping[str, str]) -> dict[str, dict[str, Any]]:
     return result
 
 
-def _configured_routes(environ: Mapping[str, str]) -> tuple[str, ...]:
+def _configured_routes(
+    environ: Mapping[str, str],
+    providers: Mapping[str, dict[str, Any]],
+) -> tuple[str, ...]:
     provider = clean(environ.get("OPENCODE_DEFAULT_PROVIDER"))
     model = clean(environ.get("OPENCODE_DEFAULT_LLM"))
     if bool(provider) != bool(model):
@@ -100,8 +228,7 @@ def _configured_routes(environ: Mapping[str, str]) -> tuple[str, ...]:
     qualified: list[str] = []
     for provider, model in routes:
         provider = "openai" if provider.lower() == "chatgpt" else provider.lower()
-        configured = _provider_groups(environ)
-        if provider != "openai" and provider not in configured:
+        if provider != "openai" and provider not in providers:
             raise ValueError(f"OpenCode provider {provider!r} is not configured")
         qualified.append(f"{provider}/{model}")
     return tuple(qualified)
@@ -112,18 +239,18 @@ def build_config(environ: Mapping[str, str]) -> dict[str, Any]:
         "$schema": "https://opencode.ai/config.json",
         "mcp": mcp_config(environ),
     }
-    routes = _configured_routes(environ)
+    providers = _provider_groups(environ)
+    routes = _configured_routes(environ, providers)
     if routes:
         config["model"] = routes[0]
         if len(routes) > 1:
             config["small_model"] = routes[1]
-        providers = _provider_groups(environ)
         for route in routes:
             provider, model = route.split("/", 1)
             if provider in providers:
                 providers[provider]["models"].setdefault(model, {})
-        if providers:
-            config["provider"] = providers
+    if providers:
+        config["provider"] = providers
     secrets = {
         clean(value)
         for name, value in environ.items()
