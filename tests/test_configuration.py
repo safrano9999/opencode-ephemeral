@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from opencode_ephemeral.configuration import build_config, write_config
+from opencode_ephemeral.configuration import build_config, write_config, write_telegram_config
 from opencode_ephemeral.environment import ConfigurationError
 from opencode_ephemeral.mcp import discover_mcp_servers
 
@@ -78,6 +78,8 @@ class OpenCodeMcpTests(unittest.TestCase):
                     "OPENCODE_DEFAULT_PROVIDER": "chatgpt",
                     "OPENCODE_DEFAULT_LLM": "gpt-6-luna",
                     "OPENCODE_API_PORT": "4096",
+                    "OPENCODE_SERVER_USERNAME": "private-user",
+                    "OPENCODE_SERVER_PASSWORD": "server-password-secret",
                 }
             )
             self.assertTrue(path.is_file())
@@ -86,9 +88,40 @@ class OpenCodeMcpTests(unittest.TestCase):
             self.assertIn("OPENCODE_MODEL_PROVIDER=openai", content)
             self.assertIn("OPENCODE_MODEL_ID=gpt-6-luna", content)
             self.assertIn("OPENCODE_API_URL=http://127.0.0.1:4096", content)
+            self.assertIn("OPENCODE_SERVER_VERSION=v1", content)
             self.assertNotIn("123:secret", content)
             self.assertNotIn("5475045993", content)
+            self.assertNotIn("server-password-secret", content)
+            self.assertNotIn("server-password-secret", path.read_text())
             self.assertEqual(bridge.stat().st_mode & 0o777, 0o600)
+
+    def test_server_password_is_optional_and_never_embedded(self) -> None:
+        plain = build_config({})
+        self.assertEqual(build_config({"OPENCODE_SERVER_PASSWORD": ""}), plain)
+        self.assertEqual(build_config({"OPENCODE_SERVER_PASSWORD": "test-secret"}), plain)
+        with self.assertRaisesRegex(RuntimeError, "secret"):
+            build_config({"OPENCODE_DEFAULT_PROVIDER": "chatgpt",
+                          "OPENCODE_DEFAULT_LLM": "dummy",
+                          "OPENCODE_SERVER_PASSWORD": "openai/dummy"})
+
+    def test_bridge_rejects_password_as_model_setting(self) -> None:
+        with self.assertRaisesRegex(ConfigurationError, "password"):
+            write_telegram_config({"OPENCODE_TELEGRAMTOKEN": "test-token",
+                                   "OPENCODE_TELEGRAM_CHAT_ID": "1",
+                                   "OPENCODE_DEFAULT_PROVIDER": "chatgpt",
+                                   "OPENCODE_DEFAULT_LLM": "test-secret",
+                                   "OPENCODE_SERVER_PASSWORD": "test-secret"})
+
+    def test_authentication_is_passed_to_both_services(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        for service in ("opencode", "opencode-telegram"):
+            unit = root / f"image/runtime/etc/systemd/system/{service}.service.d/10-opencode-ephemeral.conf"
+            self.assertIn("PassEnvironment=OPENCODE_SERVER_USERNAME OPENCODE_SERVER_PASSWORD", unit.read_text())
+
+    def test_password_example_uses_optional_config_generator(self) -> None:
+        example = (Path(__file__).resolve().parents[1] / "env.example").read_text()
+        self.assertIn("#secret\nOPENCODE_SERVER_PASSWORD=example: openssl rand -hex 32", example)
+        self.assertNotIn("#required", example.split("OPENCODE_SERVER_PASSWORD=", 1)[0])
 
 
 class OpenCodeProviderTests(unittest.TestCase):

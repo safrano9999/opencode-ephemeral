@@ -8,6 +8,14 @@ non-secret model/API settings consumed by the equal-level OpenCode Telegram
 bridge, so a missing volume is recoverable from the injected runtime
 environment.
 
+`OPENCODE_SERVER_PASSWORD` optionally enables the server's HTTP Basic auth.
+The `env.example` offers the shared `config.sh` OpenSSL generator, with skip as
+the optional default; no password is generated at image-build time. An empty
+password leaves the server unauthenticated. `OPENCODE_SERVER_USERNAME` defaults
+to `opencode`. Both systemd service drop-ins pass the same runtime credentials
+to the server and Telegram bridge. They are not written into either generated
+configuration. The bridge is explicitly configured for the OpenCode 1.x API.
+
 Each configured `OPENAI_V1_*` group is queried through its `/v1/models` endpoint
 and the returned IDs are added to that provider's OpenCode model map. An
 optional `OPENAI_V1_MODELS` (and numbered suffixes) value accepts a comma-
