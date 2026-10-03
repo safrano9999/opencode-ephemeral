@@ -125,6 +125,47 @@ class OpenCodeMcpTests(unittest.TestCase):
 
 
 class OpenCodeProviderTests(unittest.TestCase):
+    def test_configure_replaces_old_catalog_without_an_init_repair(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / ".config/opencode/opencode.json"
+            destination.parent.mkdir(parents=True)
+            destination.write_text(json.dumps({"provider": {"retired": {"models": {"old": {}}}}}))
+            environ = {
+                "HOME": temporary,
+                "OPENAI_V1_PROVIDER": "litellm",
+                "OPENAI_V1_URL": "https://models.example.test/v1",
+                "OPENAI_V1_KEY": "provider-secret",
+                "OPENAI_V1_MODELS": "explicit",
+                "MCP_SERVER_NAME": "general",
+                "MCP_SERVER_URL": "https://mcp.example.test/mcp",
+            }
+            with patch("opencode_ephemeral.configuration._discovered_models", return_value=("fresh",)):
+                path, count = write_config(environ)
+            config = json.loads(path.read_text())
+            self.assertEqual(count, 1)
+            self.assertEqual(set(config["provider"]), {"litellm"})
+            self.assertEqual(config["provider"]["litellm"]["models"], {"explicit": {}, "fresh": {}})
+            self.assertEqual(config["provider"]["litellm"]["options"]["apiKey"], "{env:OPENAI_V1_KEY}")
+            self.assertNotIn("provider-secret", path.read_text())
+            with patch("opencode_ephemeral.configuration._discovered_models", return_value=("newer",)):
+                write_config(environ)
+            self.assertEqual(json.loads(path.read_text())["provider"]["litellm"]["models"],
+                             {"explicit": {}, "newer": {}})
+
+    def test_configure_recovers_invalid_generated_json(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "opencode.json"
+            destination.write_text("invalid generated JSON")
+            path, _ = write_config({"HOME": temporary, "OPENCODE_CONFIG": str(destination)})
+            self.assertEqual(json.loads(path.read_text())["mcp"], {})
+
+    def test_both_clients_wait_for_ephemeral_configuration(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        for service in ("opencode", "opencode-telegram"):
+            unit = root / f"image/runtime/etc/systemd/system/{service}.service.d/10-opencode-ephemeral.conf"
+            self.assertIn("Requires=opencode-config.service", unit.read_text())
+            self.assertIn("After=opencode-config.service", unit.read_text())
+
     def test_openai_v1_groups_discover_models_and_normalize_url(self) -> None:
         class Response:
             def __init__(self, payload: dict[str, object]) -> None:

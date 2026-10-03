@@ -26,6 +26,13 @@ URLs with a separate `OPENAI_V1_PORT` are normalized before their path, so an
 endpoint such as `https://api.example/v1` with port `443` becomes a valid
 `https://api.example:443/v1` base URL.
 
+This generator owns provider/model discovery and recovery of the generated
+configuration; a separate container-init `OPENCODE/00-repair.py` is unnecessary.
+Both the API server and Telegram bridge require `opencode-config.service` and
+wait for it before starting, so boot does not need a corrective server restart.
+Running `opencode-ephemeral configure` again refreshes the catalog from the
+environment and providers; it does not restart an already running server.
+
 Only URLs, names, and environment placeholders are written. Bearer values are
 never persisted. `MCP_SERVER_ALLOW_PRIVATE` and `MCP_ALLOW` remain in the
 shared example for compatibility; their policy meanings belong to OpenClaw,
