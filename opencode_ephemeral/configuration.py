@@ -12,7 +12,7 @@ from urllib.parse import urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 from .environment import ConfigurationError, clean, without_secret_values
-from .mcp import mcp_config
+from .mcp import apply_mcp_config
 
 
 MAX_DISCOVERY_RESPONSE_BYTES = 8 * 1024 * 1024
@@ -237,8 +237,8 @@ def _configured_routes(
 def build_config(environ: Mapping[str, str]) -> dict[str, Any]:
     config: dict[str, Any] = {
         "$schema": "https://opencode.ai/config.json",
-        "mcp": mcp_config(environ),
     }
+    apply_mcp_config(config, environ)
     providers = _provider_groups(environ)
     routes = _configured_routes(environ, providers)
     if routes:

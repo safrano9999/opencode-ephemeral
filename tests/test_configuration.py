@@ -13,18 +13,59 @@ from opencode_ephemeral.mcp import discover_mcp_servers
 
 
 class OpenCodeMcpTests(unittest.TestCase):
+    def test_native_agent_permissions_and_none(self) -> None:
+        from fnmatch import fnmatchcase
+
+        env = {
+            'MCP_SERVER_NAME': 'tasks', 'MCP_SERVER_URL': 'http://one.test/mcp',
+            'OPENCODE_ALLOW': 'build,build', 'HERMES_ALLOW': 'none',
+            'MCP_SERVER_NAME_02': 'tasks_private', 'MCP_SERVER_URL_02': 'http://two.test/mcp',
+            'OPENCODE_ALLOW_02': 'plan', 'OPENCLAW_ALLOW_02': 'none',
+            'MCP_SERVER_NAME_3': 'tasks_shared', 'MCP_SERVER_URL_3': 'http://three.test/mcp',
+            'OPENCODE_ALLOW_3': '*',
+            'MCP_SERVER_NAME_04': 'hidden', 'MCP_SERVER_URL_04': 'http://four.test/mcp',
+            'OPENCODE_ALLOW_04': 'NONE',
+        }
+        config = build_config(env)
+        self.assertEqual(set(config['mcp']), {'tasks', 'tasks_private', 'tasks_shared'})
+        self.assertEqual(set(config['agent']), {'build', 'plan'})
+        # OpenCode uses last-matching-rule semantics. Narrow prefixes must not
+        # inherit another MCP's broader permission, in either direction.
+        def decision(agent, tool):
+            rules = list(config['permission'].items()) + list(config['agent'].get(agent, {}).get('permission', {}).items())
+            return [value for pattern, value in rules if fnmatchcase(tool, pattern)][-1]
+        for agent, own, other in (('build', 'tasks_list', 'tasks_private_list'),
+                                  ('plan', 'tasks_private_list', 'tasks_list')):
+            self.assertEqual(decision(agent, own), 'allow')
+            self.assertEqual(decision(agent, other), 'deny')
+            self.assertEqual(decision(agent, 'tasks_shared_list'), 'allow')
+        self.assertEqual(decision('general', 'tasks_list'), 'deny')
+        self.assertEqual(decision('general', 'tasks_shared_list'), 'allow')
+        env.update(OPENCODE_ALLOW='none', OPENCODE_ALLOW_02='none')
+        rebuilt = build_config(env)
+        self.assertEqual(set(rebuilt['mcp']), {'tasks_shared'})
+        self.assertNotIn('agent', rebuilt)
+
+    def test_invalid_agent_selection_is_rejected(self) -> None:
+        for value in ('build,*', 'build,none', ', ,', 'bad/name', 'build plan'):
+            with self.subTest(value=value), self.assertRaisesRegex(ConfigurationError, 'OPENCODE_ALLOW'):
+                discover_mcp_servers({'MCP_SERVER_URL': 'http://one.test/mcp', 'OPENCODE_ALLOW': value})
+        for key in ('OPENCODE_ALLOW_01', 'OPENCODE_ALLOW_51', 'OPENCODE_ALLOW_002'):
+            with self.subTest(key=key), self.assertRaisesRegex(ConfigurationError, key):
+                discover_mcp_servers({key: 'build'})
+
     def test_shared_groups_become_remote_servers_without_secrets(self) -> None:
         environ = {
             "MCP_SERVER_NAME": "general",
             "MCP_SERVER_URL": "http://general.example.test/mcp",
             "MCP_SERVER_BEARER": "general-secret",
             "MCP_SERVER_ALLOW_PRIVATE": "1",
-            "MCP_ALLOW": "main",
+            "OPENCLAW_ALLOW": "main",
             "MCP_SERVER_NAME_02": "mtg",
             "MCP_SERVER_URL_02": "https://mtg.example.test/mcp",
             "MCP_SERVER_BEARER_02": "mtg-secret",
             "MCP_SERVER_ALLOW_PRIVATE_02": "0",
-            "MCP_ALLOW_02": "mtg",
+            "OPENCLAW_ALLOW_02": "mtg",
         }
         config = build_config(environ)
         self.assertEqual(sorted(config["mcp"]), ["general", "mtg"])

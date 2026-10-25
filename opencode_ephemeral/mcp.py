@@ -14,7 +14,7 @@ from .environment import ConfigurationError, clean
 MAX_MCP_SERVERS = 50
 MCP_FIELDS = ("NAME", "URL", "BEARER", "ALLOW_PRIVATE", "ALLOW")
 MCP_SUFFIX = re.compile(
-    r"^(?:MCP_SERVER_(?:NAME|URL|BEARER|ALLOW_PRIVATE)|MCP_ALLOW)_(\d+)$"
+    r"^(?:MCP_SERVER_(?:NAME|URL|BEARER|ALLOW_PRIVATE)|OPENCODE_ALLOW)_(\d+)$"
 )
 SAFE_SERVER_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
@@ -25,6 +25,7 @@ class McpServer:
     name: str
     url: str
     bearer_env: str | None
+    agents: tuple[str, ...] = ()
 
     def opencode_config(self) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -41,7 +42,7 @@ class McpServer:
 
 
 def _field_name(environ: Mapping[str, str], field: str, index: int) -> str:
-    base = "MCP_ALLOW" if field == "ALLOW" else f"MCP_SERVER_{field}"
+    base = "OPENCODE_ALLOW" if field == "ALLOW" else f"MCP_SERVER_{field}"
     if index == 1:
         return base
     padded = f"{base}_{index:02d}"
@@ -98,6 +99,18 @@ def _name(raw_name: str, url: str, index: int) -> str:
     return value
 
 
+def _allowed_agents(environ: Mapping[str, str], key: str) -> tuple[str, ...] | None:
+    raw = clean(environ.get(key))
+    if raw.lower() == "none":
+        return None
+    if raw in {"", "*"}:
+        return ()
+    names = tuple(dict.fromkeys(name.strip() for name in raw.split(",") if name.strip()))
+    if not names or any(name.lower() == "none" or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", name) for name in names):
+        raise ConfigurationError(f"{key} must be '*', 'none', or comma-separated agent names")
+    return names
+
+
 def discover_mcp_servers(environ: Mapping[str, str]) -> tuple[McpServer, ...]:
     """Read the same suffixless, then suffix02-style groups as the other runtimes."""
 
@@ -107,6 +120,9 @@ def discover_mcp_servers(environ: Mapping[str, str]) -> tuple[McpServer, ...]:
         fields = {field: _field_name(environ, field, index) for field in MCP_FIELDS}
         raw_url = clean(environ.get(fields["URL"]))
         if not raw_url:
+            continue
+        agents = _allowed_agents(environ, fields["ALLOW"])
+        if agents is None:
             continue
         url = _url(raw_url, index)
         name = _name(environ.get(fields["NAME"], ""), url, index)
@@ -125,6 +141,7 @@ def discover_mcp_servers(environ: Mapping[str, str]) -> tuple[McpServer, ...]:
                 name=name,
                 url=url,
                 bearer_env=fields["BEARER"] if bearer else None,
+                agents=agents,
             )
         )
     return tuple(servers)
@@ -132,3 +149,23 @@ def discover_mcp_servers(environ: Mapping[str, str]) -> tuple[McpServer, ...]:
 
 def mcp_config(environ: Mapping[str, str]) -> dict[str, dict[str, Any]]:
     return {server.name: server.opencode_config() for server in discover_mcp_servers(environ)}
+
+
+def apply_mcp_config(config: dict[str, Any], environ: Mapping[str, str]) -> None:
+    """Use OpenCode's native per-agent tool permissions for restricted servers."""
+    servers = discover_mcp_servers(environ)
+    config["mcp"] = {server.name: server.opencode_config() for server in servers}
+    agents = sorted({agent for server in servers for agent in server.agents})
+    if not agents:
+        return
+    # More specific server prefixes win when names overlap, e.g. tasks/tasks_work.
+    ordered = sorted(servers, key=lambda server: (len(server.name), server.name))
+    config["permission"] = {
+        f"{server.name}_*": "deny" if server.agents else "allow" for server in ordered
+    }
+    config["agent"] = {
+        agent: {"permission": {
+            f"{server.name}_*": "allow" if not server.agents or agent in server.agents else "deny"
+            for server in ordered
+        }} for agent in agents
+    }

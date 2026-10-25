@@ -34,6 +34,29 @@ Running `opencode-ephemeral configure` again refreshes the catalog from the
 environment and providers; it does not restart an already running server.
 
 Only URLs, names, and environment placeholders are written. Bearer values are
-never persisted. `MCP_SERVER_ALLOW_PRIVATE` and `MCP_ALLOW` remain in the
-shared example for compatibility; their policy meanings belong to OpenClaw,
-while OpenCode consumes every configured HTTP MCP group.
+never persisted in the generated JSON. Each shared MCP group includes three
+independent selectors: `OPENCLAW_ALLOW`, `HERMES_ALLOW`, and `OPENCODE_ALLOW`,
+with `_02`, `_03`, etc. for subsequent groups. Blank or `*` selects all agents
+of that runtime; `none` omits that server from the runtime entirely.
+
+`OPENCODE_ALLOW=build,plan` grants the MCP tools to those OpenCode agents.
+The bootstrap generates native `permission` rules: restricted MCP tools are
+denied globally and allowed only for the listed agents. Shared servers remain
+available to all agents. More specific server prefixes override broader ones.
+Model catalogs and built-in tool permissions are unaffected. Select the actual
+OpenCode agent names (for example `build` and `plan`), not Hermes profile names.
+See [OpenCode permissions](https://opencode.ai/docs/permissions/) and
+[per-agent MCP configuration](https://opencode.ai/docs/mcp-servers/#per-agent).
+
+```dotenv
+MCP_SERVER_NAME=personal
+MCP_SERVER_URL=https://host.containers.internal:2001/mcp
+MCP_SERVER_BEARER=
+OPENCLAW_ALLOW=none
+HERMES_ALLOW=none
+OPENCODE_ALLOW=build
+```
+
+The next bootstrap reconstructs these selections from the environment; removed
+or disabled groups leave no stale permission rules in the generated config.
+`MCP_SERVER_ALLOW_PRIVATE` controls OpenClaw's private-network policy only.
