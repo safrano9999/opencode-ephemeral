@@ -147,10 +147,6 @@ def discover_mcp_servers(environ: Mapping[str, str]) -> tuple[McpServer, ...]:
     return tuple(servers)
 
 
-def mcp_config(environ: Mapping[str, str]) -> dict[str, dict[str, Any]]:
-    return {server.name: server.opencode_config() for server in discover_mcp_servers(environ)}
-
-
 def apply_mcp_config(config: dict[str, Any], environ: Mapping[str, str]) -> None:
     """Use OpenCode's native per-agent tool permissions for restricted servers."""
     servers = discover_mcp_servers(environ)
